@@ -2,23 +2,17 @@
 #include "mipi_dsi_rpi.h"
 #include "esphome/core/helpers.h"
 
-// Low-level DSI HAL access (ESP-IDF). Used to reach the DSI host for the overrides this
-// panel requires (non-burst sync-pulse mode, continuous HS clock, frame/cmd ACK disable)
-// and to send TC358762 config as DSI Generic Long Writes. Ported from embenix.
 #include "hal/mipi_dsi_hal.h"
 #include "hal/mipi_dsi_types.h"
 #include "hal/mipi_dsi_ll.h"
 
 namespace esphome::mipi_dsi_rpi {
 
-// Mirror the private esp_lcd DSI bus struct so we can reach the HAL context from the opaque
-// bus handle. Matches esp_lcd/dsi/mipi_dsi_priv.h. Update if the IDF layout changes.
 typedef struct {
   int bus_id;
   mipi_dsi_hal_context_t hal;
 } rpi_dsi_bus_priv_t;
 
-// ---- ATTINY88 control MCU (I2C 0x45) registers (rpi-panel-attiny-regulator.c) ----
 static const uint8_t REG_PORTA = 0x81;
 static const uint8_t REG_PORTB = 0x82;
 static const uint8_t REG_PORTC = 0x83;
@@ -28,7 +22,6 @@ static const uint8_t REG_ADDR_L = 0x8c;
 static const uint8_t REG_ADDR_H = 0x8d;
 static const uint8_t REG_WRITE_DATA_H = 0x90;
 static const uint8_t REG_WRITE_DATA_L = 0x91;
-// PORTA / PORTB / PORTC bit fields
 static const uint8_t PA_LCD_LR = (1 << 2);
 static const uint8_t PB_LCD_MAIN = (1 << 7);
 static const uint8_t PC_LED_EN = (1 << 0);
@@ -36,7 +29,6 @@ static const uint8_t PC_RST_TP_N = (1 << 1);
 static const uint8_t PC_RST_LCD_N = (1 << 2);
 static const uint8_t PC_RST_BRIDGE_N = (1 << 3);
 
-// ---- TC358762 DSI->DPI bridge registers (tc358762.c) ----
 static const uint16_t TC_DSI_LANEENABLE = 0x0210;
 static const uint16_t TC_PPI_D0S_CLRSIPOCOUNT = 0x0164;
 static const uint16_t TC_PPI_D1S_CLRSIPOCOUNT = 0x0168;
@@ -65,7 +57,6 @@ void MipiDsiRpi::smark_failed_(const char *message, esp_err_t err) {
   this->mark_failed();
 }
 
-// ----------------------- ATTINY88 helpers (ESPHome I2C) -----------------------
 esp_err_t MipiDsiRpi::attiny_write_register_(uint8_t reg, uint8_t val) {
   bool ok = this->write_byte(reg, val);
   if (!ok)
@@ -76,8 +67,6 @@ esp_err_t MipiDsiRpi::attiny_read_register_(uint8_t reg, uint8_t *val) {
   return this->read_byte(reg, val) ? ESP_OK : ESP_FAIL;
 }
 
-// Mirrors attiny_lcd_power_enable(): assert resets, set scan dir, main regulator on,
-// LED on (bridge stays in reset). 80ms settle.
 esp_err_t MipiDsiRpi::lcd_power_on_sequence_() {
   this->lcd_enabled_ = false;
   if (this->attiny_write_register_(REG_PORTC, 0x00) != ESP_OK)
@@ -94,8 +83,6 @@ esp_err_t MipiDsiRpi::lcd_power_on_sequence_() {
   return ESP_OK;
 }
 
-// Release TC358762 reset and wake the bridge core via the ATTINY88 SPI proxy
-// (writes TC358762 SYSPMCTRL 0x047C = 0x0000).
 esp_err_t MipiDsiRpi::release_bridge_reset_and_wake_() {
   this->attiny_write_register_(REG_PORTC, PC_LED_EN | PC_RST_LCD_N | PC_RST_BRIDGE_N);
   delay(10);
@@ -111,7 +98,6 @@ esp_err_t MipiDsiRpi::release_bridge_reset_and_wake_() {
   return ESP_OK;
 }
 
-// Release the touch controller reset so the ft5x06 component can probe it.
 esp_err_t MipiDsiRpi::release_touch_reset_() {
   this->attiny_write_register_(REG_PORTC, PC_LED_EN | PC_RST_TP_N | PC_RST_LCD_N | PC_RST_BRIDGE_N);
   delay(10);
@@ -124,12 +110,11 @@ void MipiDsiRpi::set_backlight(uint8_t brightness) {
   this->attiny_write_register_(REG_PWM, brightness);
 }
 
-// ----------------------- TC358762 bridge config (DSI Generic Long Write) -----------------------
 void MipiDsiRpi::tc358762_reg_write_(uint16_t reg, uint32_t val) {
   auto *priv = reinterpret_cast<rpi_dsi_bus_priv_t *>(this->bus_handle_);
   uint8_t payload[6] = {
-      static_cast<uint8_t>(reg & 0xFF),        static_cast<uint8_t>((reg >> 8) & 0xFF),
-      static_cast<uint8_t>(val & 0xFF),        static_cast<uint8_t>((val >> 8) & 0xFF),
+      static_cast<uint8_t>(reg & 0xFF),         static_cast<uint8_t>((reg >> 8) & 0xFF),
+      static_cast<uint8_t>(val & 0xFF),         static_cast<uint8_t>((val >> 8) & 0xFF),
       static_cast<uint8_t>((val >> 16) & 0xFF), static_cast<uint8_t>((val >> 24) & 0xFF),
   };
   mipi_dsi_hal_host_gen_write_long_packet(&priv->hal, 0, MIPI_DSI_DT_GENERIC_LONG_WRITE, payload, sizeof(payload));
@@ -137,7 +122,7 @@ void MipiDsiRpi::tc358762_reg_write_(uint16_t reg, uint32_t val) {
 
 esp_err_t MipiDsiRpi::tc358762_bridge_init_() {
   ESP_LOGI(TAG, "Configuring TC358762 bridge");
-  this->tc358762_reg_write_(TC_DSI_LANEENABLE, (1 << 0) | (1 << 1));  // CLEN + D0EN (1 data lane)
+  this->tc358762_reg_write_(TC_DSI_LANEENABLE, (1 << 0) | (1 << 1));
   this->tc358762_reg_write_(TC_PPI_D0S_CLRSIPOCOUNT, 0x05);
   this->tc358762_reg_write_(TC_PPI_D1S_CLRSIPOCOUNT, 0x05);
   this->tc358762_reg_write_(TC_PPI_D0S_ATMR, 0x00);
@@ -158,14 +143,9 @@ esp_err_t MipiDsiRpi::tc358762_bridge_init_() {
   return ESP_OK;
 }
 
-// ----------------------------------- setup -----------------------------------
 void MipiDsiRpi::setup() {
   ESP_LOGCONFIG(TAG, "Setting up RPi 7\" V1 / Hosyond MIPI-DSI panel");
 
-  // NOTE: the DSI PHY LDO (channel 3 @ 2500mV on this board) must be powered by an
-  // `esp_ldo:` entry in the YAML. ESPHome's stock mipi_dsi relies on the same mechanism.
-
-  // Read ATTINY88 firmware ID (sanity log + diagnostic).
   this->setup_stage_ = "read fw id";
   uint8_t fw_id = 0;
   if (this->attiny_read_register_(REG_ID, &fw_id) == ESP_OK) {
@@ -182,7 +162,7 @@ void MipiDsiRpi::setup() {
     return;
   }
 
-  // 1) DSI bus (1 lane, 600 Mbps).
+  this->setup_stage_ = "dsi bus";
   esp_lcd_dsi_bus_config_t bus_config = {
       .bus_id = 0,
       .num_data_lanes = this->lanes_,
@@ -193,8 +173,6 @@ void MipiDsiRpi::setup() {
   if (err != ESP_OK)
     return this->smark_failed_("esp_lcd_new_dsi_bus failed", err);
 
-  // 2) Create a DBI IO purely to latch LP-mode for Generic Long Writes, then delete it
-  //    (the LP setting persists in the DSI controller).
   esp_lcd_panel_io_handle_t dbi_io = nullptr;
   esp_lcd_dbi_io_config_t dbi_cfg = {.virtual_channel = 0, .lcd_cmd_bits = 8, .lcd_param_bits = 8};
   err = esp_lcd_new_panel_io_dbi(this->bus_handle_, &dbi_cfg, &dbi_io);
@@ -202,8 +180,7 @@ void MipiDsiRpi::setup() {
     return this->smark_failed_("esp_lcd_new_panel_io_dbi failed", err);
   esp_lcd_panel_io_del(dbi_io);
 
-  // 3) DPI panel (RGB888, num_fbs=1, panel timings). disable_lp=0 keeps LP command windows
-  //    open during blanking so the bridge config packets can be inserted.
+  this->setup_stage_ = "dpi panel";
   esp_lcd_dpi_panel_config_t dpi_config = {
       .virtual_channel = 0,
       .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
@@ -231,32 +208,27 @@ void MipiDsiRpi::setup() {
   if (err != ESP_OK)
     return this->smark_failed_("esp_lcd_new_panel_dpi failed", err);
 
-  // 4) Override video mode to NON-BURST sync-pulses + disable frame ACK (before panel_init).
   auto *priv = reinterpret_cast<rpi_dsi_bus_priv_t *>(this->bus_handle_);
   mipi_dsi_host_ll_dpi_set_video_burst_type(priv->hal.host, MIPI_DSI_LL_VIDEO_NON_BURST_WITH_SYNC_PULSES);
   mipi_dsi_host_ll_dpi_enable_frame_ack(priv->hal.host, false);
 
+  this->setup_stage_ = "panel init";
   err = esp_lcd_panel_init(this->handle_);
   if (err != ESP_OK)
     return this->smark_failed_("esp_lcd_panel_init failed", err);
 
-  // 5) Force continuous HS clock (TC358762 FLL needs a stable reference) + disable cmd ACK.
   mipi_dsi_host_ll_set_clock_lane_state(priv->hal.host, MIPI_DSI_LL_CLOCK_LANE_STATE_HS);
   mipi_dsi_host_ll_enable_cmd_ack(priv->hal.host, false);
 
-  // 6) Release bridge reset + configure TC358762 (video running, HS clock active).
   this->setup_stage_ = "bridge config";
   this->release_bridge_reset_and_wake_();
   this->tc358762_bridge_init_();
 
-  // 7) Release touch reset so the ft5x06 component can probe FT5406.
   this->release_touch_reset_();
 
-  // 8) Backlight full on.
   this->setup_stage_ = "backlight";
   this->set_backlight(255);
 
-  // 9) Frame-done semaphore (write_to_display_ waits on this after each draw_bitmap).
   this->io_lock_ = xSemaphoreCreateBinary();
   esp_lcd_dpi_panel_event_callbacks_t cbs = {.on_color_trans_done = notify_refresh_ready};
   err = esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this->io_lock_);
@@ -267,7 +239,6 @@ void MipiDsiRpi::setup() {
   ESP_LOGCONFIG(TAG, "RPi 7\" V1 / Hosyond panel setup complete");
 }
 
-// ----------------------- rendering (verbatim from ESPHome stock mipi_dsi) -----------------------
 void MipiDsiRpi::update() {
   if (this->auto_clear_enabled_)
     this->clear();
@@ -464,4 +435,17 @@ void MipiDsiRpi::dump_config() {
                 "\n  Pixel clock: %.2f MHz"
                 "\n  HSync (pw/bp/fp): %u/%u/%u"
                 "\n  VSync (pw/bp/fp): %u/%u/%u",
-                (unsigned) this->width_, (unsigned) this->height_, this->lanes_, this->la
+                (unsigned) this->width_, (unsigned) this->height_, this->lanes_, this->lane_bit_rate_,
+                this->pclk_frequency_, this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_,
+                this->vsync_pulse_width_, this->vsync_back_porch_, this->vsync_front_porch_);
+  ESP_LOGCONFIG(TAG,
+                "  ATTINY88 fw ID: 0x%02X (read %s)"
+                "\n  ATTINY88 write failures: %u"
+                "\n  Setup stage reached: %s",
+                this->attiny_fw_id_, this->attiny_id_read_ok_ ? "OK" : "FAILED",
+                (unsigned) this->attiny_write_fails_, this->setup_stage_);
+  LOG_I2C_DEVICE(this);
+}
+
+}  // namespace esphome::mipi_dsi_rpi
+#endif  // USE_ESP32_VARIANT_ESP32P4

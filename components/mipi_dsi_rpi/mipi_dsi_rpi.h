@@ -2,12 +2,6 @@
 // ESPHome external component: MIPI-DSI driver for the Raspberry Pi 7" Touch Display V1
 // (and "driver-free" 800x480 clones such as the Hosyond), on ESP32-P4.
 //
-// Clone of ESPHome's stock `mipi_dsi` display class with the panel-specific bring-up
-// injected: ATTINY88 I2C power sequencing + TC358762 DSI->DPI bridge config via DSI Generic
-// Long Writes + low-level DSI host overrides. Bring-up ported from
-// embenix/ESP32-P4-DSI-Support-Hub (rpi-7inch-touch-display-v1.c). Rendering/LVGL plumbing
-// kept verbatim from ESPHome so the existing lvgl: config binds unchanged.
-//
 #pragma once
 
 #ifdef USE_ESP32_VARIANT_ESP32P4
@@ -27,8 +21,6 @@ namespace esphome::mipi_dsi_rpi {
 
 constexpr static const char *const TAG = "display.mipi_dsi_rpi";
 
-// The display component also acts as the I2C device for the ATTINY88 control MCU (0x45).
-// The FT5x06 touch (0x38) is configured separately via ESPHome's ft5x06 platform.
 class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
  public:
   MipiDsiRpi(size_t width, size_t height, display::ColorBitness color_depth, uint8_t pixel_mode)
@@ -52,11 +44,8 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   void set_vsync_back_porch(uint16_t v) { this->vsync_back_porch_ = v; }
   void set_vsync_front_porch(uint16_t v) { this->vsync_front_porch_ = v; }
 
-  // Run our bring-up early (before the ft5x06 touch component), since we release the
-  // touch reset line via the ATTINY88.
   float get_setup_priority() const override { return setup_priority::HARDWARE; }
 
-  // Backlight 0-255 (ATTINY88 PWM register 0x86). Callable from a YAML output/lambda.
   void set_backlight(uint8_t brightness);
 
   void setup() override;
@@ -76,7 +65,6 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   bool check_buffer_();
   void smark_failed_(const char *message, esp_err_t err);
 
-  // --- RPi-panel-specific bring-up (ported from embenix) ---
   esp_err_t attiny_write_register_(uint8_t reg, uint8_t val);
   esp_err_t attiny_read_register_(uint8_t reg, uint8_t *val);
   esp_err_t lcd_power_on_sequence_();
@@ -88,15 +76,14 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   size_t width_{};
   size_t height_{};
 
-  // RPi 7" V1 timing/DSI defaults (overridable from YAML).
   uint16_t hsync_pulse_width_{2};
   uint16_t hsync_back_porch_{46};
   uint16_t hsync_front_porch_{210};
   uint16_t vsync_pulse_width_{20};
   uint16_t vsync_back_porch_{4};
   uint16_t vsync_front_porch_{22};
-  float pclk_frequency_{25.98f};  // MHz
-  float lane_bit_rate_{600};      // Mbps
+  float pclk_frequency_{25.98f};
+  float lane_bit_rate_{600};
   uint8_t lanes_{1};
 
   bool invert_colors_{};
@@ -105,8 +92,20 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   uint8_t pixel_mode_{};
   bool lcd_enabled_{false};
 
-  // --- diagnostics (surfaced in dump_config so they show over the WiFi logger) ---
-  uint8_t attiny_fw_id_{0xAB};       // 0xDE=v1, 0xC3=v2, 0x00=read returned 0, 0xAB=read failed
+  uint8_t attiny_fw_id_{0xAB};
   bool attiny_id_read_ok_{false};
-  uint16_t attiny_write_fails_{0};   // count of NAKed ATTINY register writes
-  const char *
+  uint16_t attiny_write_fails_{0};
+  const char *setup_stage_{"not started"};
+
+  esp_lcd_panel_handle_t handle_{};
+  esp_lcd_dsi_bus_handle_t bus_handle_{};
+  SemaphoreHandle_t io_lock_{};
+  uint8_t *buffer_{nullptr};
+  uint16_t x_low_{1};
+  uint16_t y_low_{1};
+  uint16_t x_high_{0};
+  uint16_t y_high_{0};
+};
+
+}  // namespace esphome::mipi_dsi_rpi
+#endif  // USE_ESP32_VARIANT_ESP32P4
