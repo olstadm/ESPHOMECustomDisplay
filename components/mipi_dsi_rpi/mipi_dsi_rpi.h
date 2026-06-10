@@ -105,15 +105,8 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   uint8_t pixel_mode_{};
   bool lcd_enabled_{false};
 
-  esp_lcd_panel_handle_t handle_{};
-  esp_lcd_dsi_bus_handle_t bus_handle_{};
-  SemaphoreHandle_t io_lock_{};
-  uint8_t *buffer_{nullptr};
-  uint16_t x_low_{1};
-  uint16_t y_low_{1};
-  uint16_t x_high_{0};
-  uint16_t y_high_{0};
-};
-
-}  // namespace esphome::mipi_dsi_rpi
-#endif  // USE_ESP32_VARIANT_ESP32P4
+  // --- diagnostics (surfaced in dump_config so they show over the WiFi logger) ---
+  uint8_t attiny_fw_id_{0xAB};       // 0xDE=v1, 0xC3=v2, 0x00=read returned 0, 0xAB=read failed
+  bool attiny_id_read_ok_{false};
+  uint16_t attiny_write_fails_{0};   // count of NAKed ATTINY register writes
+  const char *

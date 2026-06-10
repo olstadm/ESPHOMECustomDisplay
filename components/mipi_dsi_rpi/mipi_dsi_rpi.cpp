@@ -67,7 +67,10 @@ void MipiDsiRpi::smark_failed_(const char *message, esp_err_t err) {
 
 // ----------------------- ATTINY88 helpers (ESPHome I2C) -----------------------
 esp_err_t MipiDsiRpi::attiny_write_register_(uint8_t reg, uint8_t val) {
-  return this->write_byte(reg, val) ? ESP_OK : ESP_FAIL;
+  bool ok = this->write_byte(reg, val);
+  if (!ok)
+    this->attiny_write_fails_++;
+  return ok ? ESP_OK : ESP_FAIL;
 }
 esp_err_t MipiDsiRpi::attiny_read_register_(uint8_t reg, uint8_t *val) {
   return this->read_byte(reg, val) ? ESP_OK : ESP_FAIL;
@@ -162,14 +165,18 @@ void MipiDsiRpi::setup() {
   // NOTE: the DSI PHY LDO (channel 3 @ 2500mV on this board) must be powered by an
   // `esp_ldo:` entry in the YAML. ESPHome's stock mipi_dsi relies on the same mechanism.
 
-  // Read ATTINY88 firmware ID (sanity log).
+  // Read ATTINY88 firmware ID (sanity log + diagnostic).
+  this->setup_stage_ = "read fw id";
   uint8_t fw_id = 0;
   if (this->attiny_read_register_(REG_ID, &fw_id) == ESP_OK) {
+    this->attiny_fw_id_ = fw_id;
+    this->attiny_id_read_ok_ = true;
     ESP_LOGI(TAG, "ATTINY88 firmware ID: 0x%02X", fw_id);
   } else {
     ESP_LOGW(TAG, "Could not read ATTINY88 firmware ID (I2C 0x45)");
   }
 
+  this->setup_stage_ = "power-on";
   if (this->lcd_power_on_sequence_() != ESP_OK) {
     this->smark_failed_("ATTINY88 power-on failed", ESP_FAIL);
     return;
@@ -238,6 +245,7 @@ void MipiDsiRpi::setup() {
   mipi_dsi_host_ll_enable_cmd_ack(priv->hal.host, false);
 
   // 6) Release bridge reset + configure TC358762 (video running, HS clock active).
+  this->setup_stage_ = "bridge config";
   this->release_bridge_reset_and_wake_();
   this->tc358762_bridge_init_();
 
@@ -245,6 +253,7 @@ void MipiDsiRpi::setup() {
   this->release_touch_reset_();
 
   // 8) Backlight full on.
+  this->setup_stage_ = "backlight";
   this->set_backlight(255);
 
   // 9) Frame-done semaphore (write_to_display_ waits on this after each draw_bitmap).
@@ -254,6 +263,7 @@ void MipiDsiRpi::setup() {
   if (err != ESP_OK)
     return this->smark_failed_("register_event_callbacks failed", err);
 
+  this->setup_stage_ = "complete";
   ESP_LOGCONFIG(TAG, "RPi 7\" V1 / Hosyond panel setup complete");
 }
 
@@ -454,11 +464,4 @@ void MipiDsiRpi::dump_config() {
                 "\n  Pixel clock: %.2f MHz"
                 "\n  HSync (pw/bp/fp): %u/%u/%u"
                 "\n  VSync (pw/bp/fp): %u/%u/%u",
-                (unsigned) this->width_, (unsigned) this->height_, this->lanes_, this->lane_bit_rate_,
-                this->pclk_frequency_, this->hsync_pulse_width_, this->hsync_back_porch_, this->hsync_front_porch_,
-                this->vsync_pulse_width_, this->vsync_back_porch_, this->vsync_front_porch_);
-  LOG_I2C_DEVICE(this);
-}
-
-}  // namespace esphome::mipi_dsi_rpi
-#endif  // USE_ESP32_VARIANT_ESP32P4
+                (unsigned) this->width_, (unsigned) this->height_, this->lanes_, this->la
