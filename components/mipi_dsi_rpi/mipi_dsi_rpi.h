@@ -101,6 +101,7 @@ class MipiDsiRpi : public display::Display, public i2c::I2CDevice {
   esp_lcd_dsi_bus_handle_t bus_handle_{};
   SemaphoreHandle_t io_lock_{};
   uint8_t *buffer_{nullptr};
+  uint8_t *conv_buf_{nullptr};
   uint16_t x_low_{1};
   uint16_t y_low_{1};
   uint16_t x_high_{0};

@@ -267,11 +267,55 @@ void MipiDsiRpi::draw_pixels_at(int x_start, int y_start, int w, int h, const ui
                                 display::ColorBitness bitness, bool big_endian, int x_offset, int y_offset, int x_pad) {
   if (w <= 0 || h <= 0)
     return;
-  if (bitness != this->color_depth_) {
-    display::Display::draw_pixels_at(x_start, y_start, w, h, ptr, order, bitness, big_endian, x_offset, y_offset, x_pad);
+  // Reusable full-screen RGB888 conversion buffer (PSRAM).
+  if (this->conv_buf_ == nullptr) {
+    RAMAllocator<uint8_t> allocator;
+    this->conv_buf_ = allocator.allocate(this->width_ * this->height_ * 3);
+    if (this->conv_buf_ == nullptr) {
+      ESP_LOGE(TAG, "conversion buffer alloc failed");
+      return;
+    }
+  }
+  // Extract the flushed sub-region into a contiguous RGB888 block, converting from
+  // whatever LVGL sent us (RGB565 or RGB888), then push it in ONE draw_bitmap.
+  const size_t src_bpp = (bitness == display::COLOR_BITNESS_888) ? 3 : 2;
+  const size_t src_stride = (size_t)(x_offset + w + x_pad) * src_bpp;
+  const uint8_t *row = ptr + (size_t) y_offset * src_stride + (size_t) x_offset * src_bpp;
+  uint8_t *dst = this->conv_buf_;
+  const bool out_bgr = (this->color_mode_ == display::COLOR_ORDER_BGR);
+  for (int yy = 0; yy < h; yy++) {
+    const uint8_t *sp = row;
+    for (int xx = 0; xx < w; xx++) {
+      uint8_t r, g, b;
+      if (bitness == display::COLOR_BITNESS_888) {
+        if (order == display::COLOR_ORDER_BGR) {
+          b = sp[0]; g = sp[1]; r = sp[2];
+        } else {
+          r = sp[0]; g = sp[1]; b = sp[2];
+        }
+        sp += 3;
+      } else {
+        uint16_t v = big_endian ? (uint16_t)((sp[0] << 8) | sp[1]) : (uint16_t)((sp[1] << 8) | sp[0]);
+        uint8_t r5 = (v >> 11) & 0x1F, g6 = (v >> 5) & 0x3F, b5 = v & 0x1F;
+        r = (r5 << 3) | (r5 >> 2);
+        g = (g6 << 2) | (g6 >> 4);
+        b = (b5 << 3) | (b5 >> 2);
+        sp += 2;
+      }
+      if (out_bgr) {
+        *dst++ = b; *dst++ = g; *dst++ = r;
+      } else {
+        *dst++ = r; *dst++ = g; *dst++ = b;
+      }
+    }
+    row += src_stride;
+  }
+  esp_err_t err = esp_lcd_panel_draw_bitmap(this->handle_, x_start, y_start, x_start + w, y_start + h, this->conv_buf_);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "draw_bitmap failed: %s", esp_err_to_name(err));
     return;
   }
-  this->write_to_display_(x_start, y_start, w, h, ptr, x_offset, y_offset, x_pad);
+  xSemaphoreTake(this->io_lock_, pdMS_TO_TICKS(100));
 }
 
 void MipiDsiRpi::write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset,
